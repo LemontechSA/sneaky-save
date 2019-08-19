@@ -68,7 +68,6 @@ module SneakySave
   # Performs update query without running callbacks
   # @return [false, true]
   def sneaky_update
-    debugger 
     return true if changes.empty?
 
     pk = self.class.primary_key
