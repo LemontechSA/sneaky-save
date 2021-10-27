@@ -4,6 +4,10 @@
 #++
 module SneakySave
 
+  class NonEnumerableRange < Range
+    undef :map
+  end
+
   # Saves the record without running callbacks/validations.
   # Returns true if the record is changed.
   # @note - Does not reload updated record by default.
@@ -40,7 +44,7 @@ module SneakySave
                                    .except { |key| key.name == "id" }
 
     column_keys = sneaky_attributes_without_id.keys
-                  .map { |key| "\`#{key.name}\`" } # to avoid conflicts with column names
+                  .map { |key| "\"#{key.name}\"" } # to avoid conflicts with column names
                   .join(", ")
 
     dynamic_keys = sneaky_attributes_without_id.keys
@@ -57,11 +61,22 @@ module SneakySave
       INSERT INTO #{self.class.table_name} ( #{column_keys} )
       VALUES (#{dynamic_keys})
       #{constraint}
+      RETURNING *
     SQL
 
     mapping = generate_insert_mapping(sneaky_attributes_without_id)
-    self.id = self.class.connection.insert self.class.sanitize_sql_for_conditions([sql.squish, mapping.to_h])
-    self.reload
+    data = self.class.unscoped.find_by_sql([sql.squish, mapping.to_h]).first
+
+    # To trigger generation of @mutations_from_database variable
+    # which is necessary for id_in_database
+    data.send(:mutations_from_database)
+
+    copy_internal(data, "@attributes")
+    copy_internal(data, "@mutations_from_database")
+    copy_internal(data, "@changed_attributes")
+    copy_internal(data, "@new_record")
+    copy_internal(data, "@destroyed")
+
     !!id
   end
 
@@ -115,9 +130,10 @@ module SneakySave
   end
 
   def sneaky_attributes_values
-    attributes_with_values = send :attributes_with_values_for_create, attribute_names
+    attributes_for_create = send :attributes_for_create, attribute_names
+    attributes_with_values = send :attributes_with_values, attributes_for_create
     attributes_with_values.each_with_object({}) do |attribute_value, hash|
-      hash[self.class.send(:arel_attribute, attribute_value[0])] = attribute_value[1]
+      hash[self.class.arel_table[attribute_value[0]]] = attribute_value[1]
     end
   end
 
@@ -126,7 +142,10 @@ module SneakySave
     # by manipulating ranges so that they are not seen as iterable and will be properly handled by
     # ActiveRecord::Sanitization.quote_bound_value
     # https://github.com/rails/rails/issues/36682
-    value.instance_eval('undef :map') if value.is_a?(Range)
+    if value.is_a?(Range)
+      # Ranges are frozen in Ruby 3. We construct a new Range that isn't enumerable.
+      return NonEnumerableRange.new(value.first, value.end)
+    end
     value
   end
 
